@@ -40,6 +40,8 @@ public struct LearnedData: Codable, Equatable, Sendable {
     public var rejectedCorrections: Set<String> = []
     /// Canonical word to the spelling this user prefers: "nahi" to "nhi".
     public var preferredSpellings: [String: String] = [:]
+    /// Emoji the user picked, most recent first.
+    public var recentEmoji: [String] = []
     /// What a word typed in English letters should become in Hindi, as this user chose it:
     /// "sita" to "सीता". A word mapped to itself stays in English letters.
     public var hindiSpellings: [String: String] = [:]
@@ -49,6 +51,7 @@ public struct LearnedData: Codable, Equatable, Sendable {
 
     public var isEmpty: Bool {
         wordCounts.isEmpty && bigramCounts.isEmpty && phraseCounts.isEmpty && rejectedCorrections.isEmpty && preferredSpellings.isEmpty
+            && recentEmoji.isEmpty
             && hindiSpellings.isEmpty
     }
 
@@ -60,6 +63,7 @@ public struct LearnedData: Codable, Equatable, Sendable {
         phraseCounts = try c.decodeIfPresent([String: Int].self, forKey: .phraseCounts) ?? [:]
         rejectedCorrections = try c.decodeIfPresent(Set<String>.self, forKey: .rejectedCorrections) ?? []
         preferredSpellings = try c.decodeIfPresent([String: String].self, forKey: .preferredSpellings) ?? [:]
+        recentEmoji = try c.decodeIfPresent([String].self, forKey: .recentEmoji) ?? []
         hindiSpellings = try c.decodeIfPresent([String: String].self, forKey: .hindiSpellings) ?? [:]
         resetGeneration = try c.decodeIfPresent(Int.self, forKey: .resetGeneration) ?? 0
     }
@@ -126,6 +130,11 @@ public final class PersonalizationEngine {
         isEnabled ? learned.preferredSpellings[canonical.lowercased()] : nil
     }
 
+    public static let recentEmojiLimit = 24
+
+    /// Emoji the user picked, most recent first.
+    public var recentEmoji: [String] { isEnabled ? learned.recentEmoji : [] }
+
     /// The Hindi spelling this user chose for a word typed in English letters, or the word itself
     /// when they chose to keep it in English.
     public func hindiSpelling(of roman: String) -> String? {
@@ -185,6 +194,17 @@ public final class PersonalizationEngine {
     public func recordPreserved(word: String) {
         guard isEnabled else { return }
         learned.wordCounts[word.lowercased(), default: 0] += 1
+        dirty = true
+    }
+
+    /// The user picked an emoji, from the panel or the suggestion bar.
+    public func recordEmoji(_ emoji: String) {
+        guard isEnabled, !emoji.isEmpty else { return }
+        learned.recentEmoji.removeAll { $0 == emoji }
+        learned.recentEmoji.insert(emoji, at: 0)
+        if learned.recentEmoji.count > Self.recentEmojiLimit {
+            learned.recentEmoji.removeLast(learned.recentEmoji.count - Self.recentEmojiLimit)
+        }
         dirty = true
     }
 

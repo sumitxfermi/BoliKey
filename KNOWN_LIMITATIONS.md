@@ -36,7 +36,7 @@ There is no cloud or on-device model. A `RewriteProvider` protocol exists for on
 - No swipe typing, no text replacement import, no key customisation.
 - The Devanagari layout is custom and not a standard such as InScript, and typing conjuncts on it needs the `्` key. Typing Hindi in English letters is an option in Settings, Language.
 - Personalised learning needs the user to tap suggestions, so it builds slowly. That is the privacy trade-off.
-- The emoji list is a fixed, curated set with no search or recents.
+- The emoji panel is a fixed, curated set. Emoji suggestions and search come from a hand-written table of about 330 Hinglish, English and Hindi words, plus each emoji's English Unicode name, so plenty of words have no emoji.
 - iPad runs the iPhone layout scaled up, and has not been tuned or tested.
 - VoiceOver labels are set on all keys, but no one has tested it with VoiceOver running.
 - Themes are colours only, with no photo backgrounds. On iPhones with Face ID, iOS draws the strip under the keyboard with its own globe and microphone, and that strip keeps the system colour. Themes have only been seen on the simulator.

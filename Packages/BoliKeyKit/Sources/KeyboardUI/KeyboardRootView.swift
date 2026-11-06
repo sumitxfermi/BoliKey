@@ -31,7 +31,11 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
     private let grid: KeyGridView
     private lazy var emojiPanel: EmojiPanel = makeEmojiPanel()
     private lazy var rewritePanel: RewritePanel = makeRewritePanel()
-    private var panelsLoaded: (emoji: Bool, rewrite: Bool) = (false, false)
+    private lazy var emojiSearchBar: EmojiSearchBar = makeEmojiSearchBar()
+    /// The emoji search, or nil when not searching. While searching, keys type into it, never into the field.
+    private var emojiSearchQuery: String?
+    private var recentEmoji: [String] = []
+    private var panelsLoaded: (emoji: Bool, rewrite: Bool, emojiSearch: Bool) = (false, false, false)
     private var page: KeyboardPage = .letters
     private var settings = KeyboardSettings()
     private var globeControl: UIControl?
@@ -98,6 +102,8 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
 
     /// Call when the keyboard is about to appear.
     public func willAppear() {
+        // A search does not survive the keyboard being put away.
+        if emojiSearchQuery != nil { endEmojiSearch(showingPanel: false) }
         let store = storeFactory()
         settings = SettingsStore.load(from: store)
         applySettingsToUI()
@@ -132,6 +138,7 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
         bar.apply(theme: theme)
         grid.apply(theme: theme)
         if panelsLoaded.emoji { emojiPanel.apply(theme: theme) }
+        if panelsLoaded.emojiSearch { emojiSearchBar.apply(theme: theme) }
         if panelsLoaded.rewrite {
             rewritePanel.apply(theme: theme)
             rewritePanel.backgroundColor = theme.panelBackground
@@ -177,6 +184,7 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
         let content = CGRect(x: 0, y: Self.suggestionBarHeight, width: bounds.width, height: bounds.height - Self.suggestionBarHeight)
         grid.frame = content.insetBy(dx: 0, dy: 0)
         if emojiPanel.superview != nil { emojiPanel.frame = content }
+        if emojiSearchBar.superview != nil { emojiSearchBar.frame = bar.frame }
         if rewritePanel.superview != nil { rewritePanel.frame = bounds }
     }
 
@@ -186,6 +194,16 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
 
     private func rebuildKeys() {
         guard let host else { return }
+        // A search's space bar types into the search. Moving the cursor in the field would put the
+        // emoji somewhere the user did not choose.
+        grid.allowsCursorDrag = emojiSearchQuery == nil
+        // Emoji keywords are in Roman letters, so a search always gets the English layout.
+        if emojiSearchQuery != nil {
+            var rows = KeyboardLayouts.rows(for: .letters, uppercase: false)
+            rows.append(KeyboardLayouts.emojiSearchBottomRow(needsGlobe: host.needsGlobeKey))
+            grid.setKeys(rows, shift: .off)
+            return
+        }
         if page == .letters || page == .devanagari { page = basePage() }
         let spaceLabel = settings.languageMode == .hindi ? (settings.phoneticHindiEnabled ? "हिन्दी" : "स्पेस") : "BoliKey"
         var rows = KeyboardLayouts.rows(for: page, uppercase: input.shift.isUppercase)
@@ -211,7 +229,7 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
     }
 
     private func shiftChanged() {
-        if page == .letters { grid.update(shift: input.shift) }
+        if page == .letters, emojiSearchQuery == nil { grid.update(shift: input.shift) }
     }
 
     // MARK: KeyGridDelegate
@@ -226,6 +244,10 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
     }
 
     func grid(_ grid: KeyGridView, didTrigger action: KeyAction) {
+        if emojiSearchQuery != nil {
+            searchKeyTapped(action)
+            return
+        }
         switch action {
         case .character(let s):
             input.insertCharacter(s, respectingShift: page == .letters)
@@ -257,11 +279,19 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
     }
 
     func grid(_ grid: KeyGridView, didChooseAlternate text: String) {
+        if let query = emojiSearchQuery {
+            updateEmojiSearch(query + text.lowercased())
+            return
+        }
         input.insertCharacter(text, respectingShift: false)
         refreshSuggestions()
     }
 
     func gridDidRepeatBackspace(_ grid: KeyGridView, byWord: Bool) {
+        if let query = emojiSearchQuery {
+            updateEmojiSearch(byWord ? "" : String(query.dropLast()))
+            return
+        }
         if byWord {
             input.deleteWordBackward()
         } else {
@@ -434,10 +464,7 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
     private func makeEmojiPanel() -> EmojiPanel {
         panelsLoaded.emoji = true
         let panel = EmojiPanel(theme: theme)
-        panel.onEmoji = { [weak self] emoji in
-            self?.input.insertLiteral(emoji)
-            self?.refreshSuggestions()
-        }
+        panel.onEmoji = { [weak self] emoji in self?.insertEmoji(emoji) }
         panel.onBackspace = { [weak self] in
             self?.input.tapBackspace()
             self?.refreshSuggestions()
@@ -446,13 +473,95 @@ public final class KeyboardRootView: UIView, KeyGridDelegate, SuggestionBarDeleg
             self?.emojiPanel.removeFromSuperview()
             self?.grid.isHidden = false
         }
+        panel.onSearch = { [weak self] in self?.beginEmojiSearch() }
         return panel
+    }
+
+    /// Types an emoji picked from the panel or a search, and remembers it for the recent row.
+    private func insertEmoji(_ emoji: String) {
+        input.insertLiteral(emoji)
+        if let engine {
+            engineQueue.async { engine.didUseEmoji(emoji) }
+        }
+        refreshSuggestions()
     }
 
     private func showEmoji() {
         grid.isHidden = true
         addSubview(emojiPanel)
         setNeedsLayout()
+        // The recent row only changes when the panel opens, so nothing moves while picking.
+        guard let engine else { return }
+        engineQueue.async { [weak self] in
+            let recents = engine.personalization.recentEmoji
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recentEmoji = recents
+                self.emojiPanel.setRecents(recents)
+                self.emojiPanel.scrollToStart()
+            }
+        }
+    }
+
+    // MARK: Emoji search
+
+    private func makeEmojiSearchBar() -> EmojiSearchBar {
+        panelsLoaded.emojiSearch = true
+        let bar = EmojiSearchBar(theme: theme)
+        bar.onSelect = { [weak self] emoji in self?.insertEmoji(emoji) }
+        bar.onClose = { [weak self] in self?.endEmojiSearch(showingPanel: true) }
+        return bar
+    }
+
+    private func beginEmojiSearch() {
+        emojiPanel.removeFromSuperview()
+        grid.isHidden = false
+        bar.isHidden = true
+        addSubview(emojiSearchBar)
+        emojiSearchQuery = ""
+        updateEmojiSearch("")
+        rebuildKeys()
+        setNeedsLayout()
+    }
+
+    /// Before anything is typed, the search shows the recent emoji.
+    private func updateEmojiSearch(_ query: String) {
+        emojiSearchQuery = query
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        let results = trimmed.isEmpty ? recentEmoji : EmojiLexicon.shared.search(trimmed, among: EmojiCatalog.allEmoji)
+        emojiSearchBar.update(query: query, results: results)
+    }
+
+    private func endEmojiSearch(showingPanel: Bool) {
+        guard emojiSearchQuery != nil else { return }
+        emojiSearchQuery = nil
+        emojiSearchBar.removeFromSuperview()
+        bar.isHidden = false
+        page = basePage()
+        rebuildKeys()
+        input.syncAutoCapitalization()
+        if showingPanel { showEmoji() }
+        refreshSuggestions()
+    }
+
+    private func searchKeyTapped(_ action: KeyAction) {
+        guard let query = emojiSearchQuery else { return }
+        switch action {
+        case .character(let s):
+            updateEmojiSearch(query + s.lowercased())
+        case .space:
+            if !query.isEmpty, !query.hasSuffix(" ") { updateEmojiSearch(query + " ") }
+        case .backspace:
+            updateEmojiSearch(String(query.dropLast()))
+        case .page(.emoji):
+            endEmojiSearch(showingPanel: true)
+        case .page, .returnKey:
+            endEmojiSearch(showingPanel: false)
+        case .nextKeyboard:
+            host?.advanceToNextKeyboard()
+        case .shift:
+            break
+        }
     }
 }
 
